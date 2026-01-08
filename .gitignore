@@ -140,4 +140,5 @@ Thumbs.db
 
 # Project Specific
 vtk_output/
+vtk_*
 *.png
