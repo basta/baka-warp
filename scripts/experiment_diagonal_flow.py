@@ -98,7 +98,6 @@ def main():
                 sim.density_arrays[0], 
                 sim.vx_arrays[0], 
                 sim.vy_arrays[0],
-                sim.n_grid,
                 sim.dh
             ]
         )
@@ -125,7 +124,6 @@ def main():
             sim.density_arrays[0], 
             sim.vx_arrays[0], 
             sim.vy_arrays[0],
-            sim.n_grid,
             sim.dh
         ]
     )

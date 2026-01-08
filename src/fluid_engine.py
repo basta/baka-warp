@@ -72,11 +72,11 @@ def init_mask_sphere(
         mask[i, j, k] = 0 # Solid
 
 @wp.func
-def cyclic_index(idx: wp.int32, n_grid: int):
+def cyclic_index(idx: wp.int32, dim_size: int):
     """Helper function to index with periodic boundary conditions."""
-    ret_idx = idx % n_grid
+    ret_idx = idx % dim_size
     if ret_idx < 0:
-        ret_idx += n_grid
+        ret_idx += dim_size
     return ret_idx
 
 
@@ -85,7 +85,6 @@ def initialize_fields(
     density: wp.array2d(dtype=float),
     u: wp.array2d(dtype=float),
     v: wp.array2d(dtype=float),
-    n_grid: int,
     dh: float
 ):
     i, j = wp.tid()
@@ -137,12 +136,12 @@ def apply_forces(
 
 
 @wp.func
-def sample_field(field: wp.array2d(dtype=float), x: float, y: float, n_grid: int):
+def sample_field(field: wp.array2d(dtype=float), x: float, y: float, nx: int, ny: int):
     # Bilinear interpolation
     # field is defined at integer indices 0..N-1
     # clamp coords
-    x = wp.max(0.0, wp.min(x, float(n_grid) - 1.0))
-    y = wp.max(0.0, wp.min(y, float(n_grid) - 1.0))
+    x = wp.max(0.0, wp.min(x, float(nx) - 1.0))
+    y = wp.max(0.0, wp.min(y, float(ny) - 1.0))
 
     x0 = wp.int32(wp.floor(x))
     y0 = wp.int32(wp.floor(y))
@@ -152,8 +151,8 @@ def sample_field(field: wp.array2d(dtype=float), x: float, y: float, n_grid: int
     wx0 = 1.0 - wx1
     wy0 = 1.0 - wy1
     
-    x1 = wp.min(x0 + 1, n_grid - 1)
-    y1 = wp.min(y0 + 1, n_grid - 1)
+    x1 = wp.min(x0 + 1, nx - 1)
+    y1 = wp.min(y0 + 1, ny - 1)
     
     val = (wx0 * wy0 * field[x0, y0] + 
            wx1 * wy0 * field[x1, y0] + 
@@ -167,7 +166,8 @@ def advect_mac_u(
     u: wp.array2d(dtype=float),
     v: wp.array2d(dtype=float),
     u_new: wp.array2d(dtype=float),
-    n_grid: int,
+    nx: int,
+    ny: int,
     dh: float
 ):
     # Advect u component. u lives at (i, j+0.5):
@@ -190,7 +190,7 @@ def advect_mac_u(
     # To get world (i, j+0.5), we sample v at grid coord (i-0.5, j+0.5).
     grid_v_x = float(i) - 0.5
     grid_v_y = float(j) + 0.5
-    vel_y = sample_field(v, grid_v_x, grid_v_y, n_grid)
+    vel_y = sample_field(v, grid_v_x, grid_v_y, nx, ny)
     
     # Backtrace
     src_x = x - vel_x * dt
@@ -201,7 +201,7 @@ def advect_mac_u(
     grid_src_x = src_x / dh
     grid_src_y = (src_y / dh) - 0.5
     
-    u_new[i, j] = sample_field(u, grid_src_x, grid_src_y, n_grid)
+    u_new[i, j] = sample_field(u, grid_src_x, grid_src_y, nx, ny)
 
 
 @wp.kernel
@@ -210,7 +210,8 @@ def advect_mac_v(
     u: wp.array2d(dtype=float),
     v: wp.array2d(dtype=float),
     v_new: wp.array2d(dtype=float),
-    n_grid: int,
+    nx: int,
+    ny: int,
     dh: float
 ):
     # Advect v component. v lives at (i+0.5, j).
@@ -230,7 +231,7 @@ def advect_mac_v(
     # u grid coords: x_u = i + 0.5, y_u = j - 0.5
     grid_u_x = float(i) + 0.5
     grid_u_y = float(j) - 0.5
-    vel_x = sample_field(u, grid_u_x, grid_u_y, n_grid)
+    vel_x = sample_field(u, grid_u_x, grid_u_y, nx, ny)
     
     # Backtrace
     src_x = x - vel_x * dt
@@ -240,7 +241,7 @@ def advect_mac_v(
     grid_src_x = (src_x / dh) - 0.5
     grid_src_y = (src_y / dh)
     
-    v_new[i, j] = sample_field(v, grid_src_x, grid_src_y, n_grid)
+    v_new[i, j] = sample_field(v, grid_src_x, grid_src_y, nx, ny)
 
 
 @wp.kernel
@@ -251,7 +252,8 @@ def advect_density(
     rho_old: wp.array2d(dtype=float),
     rho_new: wp.array2d(dtype=float),
     bc_type: int,
-    n_grid: int,
+    nx: int,
+    ny: int,
     dh: float
 ):
     # Advect scalar at cell centers (i+0.5, j+0.5)
@@ -271,16 +273,16 @@ def advect_density(
     v_idx1 = float(0.0)
     
     if bc_type == BC_PERIODIC:
-        u_idx1 = u[cyclic_index(i + 1, n_grid), j]
-        v_idx1 = v[i, cyclic_index(j + 1, n_grid)]
+        u_idx1 = u[cyclic_index(i + 1, nx), j]
+        v_idx1 = v[i, cyclic_index(j + 1, ny)]
     else:
         # BC_WALL
-        if i == n_grid - 1:
+        if i == nx - 1:
             u_idx1 = 0.0
         else:
             u_idx1 = u[i + 1, j]
             
-        if j == n_grid - 1:
+        if j == ny - 1:
             v_idx1 = 0.0
         else:
             v_idx1 = v[i, j + 1]
@@ -295,11 +297,11 @@ def advect_density(
     grid_src_x = (src_x / dh) - 0.5
     grid_src_y = (src_y / dh) - 0.5
     
-    rho_new[i, j] = sample_field(rho_old, grid_src_x, grid_src_y, n_grid)
+    rho_new[i, j] = sample_field(rho_old, grid_src_x, grid_src_y, nx, ny)
 
 
 @wp.kernel
-def divergence(u: wp.array2d(dtype=float), v: wp.array2d(dtype=float), mask: wp.array2d(dtype=int), div: wp.array2d(dtype=float), n_grid: int, dh: float):
+def divergence(u: wp.array2d(dtype=float), v: wp.array2d(dtype=float), mask: wp.array2d(dtype=int), div: wp.array2d(dtype=float), nx: int, ny: int, dh: float):
     """Compute div(u) at cell centers."""
     i, j = wp.tid()
     
@@ -320,7 +322,7 @@ def divergence(u: wp.array2d(dtype=float), v: wp.array2d(dtype=float), mask: wp.
     u_left = u[i, j]
     
     # Right face
-    if i == n_grid - 1:
+    if i == nx - 1:
         u_right = 0.0
     else:
         u_right = u[i + 1, j]
@@ -329,7 +331,7 @@ def divergence(u: wp.array2d(dtype=float), v: wp.array2d(dtype=float), mask: wp.
     v_bot = v[i, j]
     
     # Top face
-    if j == n_grid - 1:
+    if j == ny - 1:
         v_top = 0.0
     else:
         v_top = v[i, j + 1]
@@ -338,7 +340,7 @@ def divergence(u: wp.array2d(dtype=float), v: wp.array2d(dtype=float), mask: wp.
 
 
 @wp.kernel
-def jacobi_iter(div: wp.array2d(dtype=float), p0: wp.array2d(dtype=float), mask: wp.array2d(dtype=int), p1: wp.array2d(dtype=float), n_grid: int, dh: float):
+def jacobi_iter(div: wp.array2d(dtype=float), p0: wp.array2d(dtype=float), mask: wp.array2d(dtype=int), p1: wp.array2d(dtype=float), nx: int, ny: int, dh: float):
     """Solve Laplacian P = div with mask support."""
     i, j = wp.tid()
     
@@ -363,7 +365,7 @@ def jacobi_iter(div: wp.array2d(dtype=float), p0: wp.array2d(dtype=float), mask:
         val_left = p0[i-1, j]
         
     # Right (i+1)
-    if i == n_grid - 1:
+    if i == nx - 1:
         val_right = p0[i, j]
     elif mask[i+1, j] == 0:
         val_right = p0[i, j]
@@ -379,7 +381,7 @@ def jacobi_iter(div: wp.array2d(dtype=float), p0: wp.array2d(dtype=float), mask:
         val_down = p0[i, j-1]
         
     # Up (j+1)
-    if j == n_grid - 1:
+    if j == ny - 1:
         val_up = p0[i, j]
     elif mask[i, j+1] == 0:
         val_up = p0[i, j]
@@ -399,7 +401,8 @@ def update_velocities(
     u_out: wp.array2d(dtype=float),
     v_out: wp.array2d(dtype=float),
     bc_type: int,
-    n_grid: int,
+    nx: int,
+    ny: int,
     dh: float
 ):
     """Subtract pressure gradient."""
@@ -409,10 +412,10 @@ def update_velocities(
     # Grad P x component at face: (P[i,j] - P[i-1,j]) / DH
     
     if bc_type == BC_PERIODIC:
-        grad_p_x = (p[i, j] - p[cyclic_index(i - 1, n_grid), j]) / dh
+        grad_p_x = (p[i, j] - p[cyclic_index(i - 1, nx), j]) / dh
         u_out[i, j] = u_in[i, j] - grad_p_x
         
-        grad_p_y = (p[i, j] - p[i, cyclic_index(j - 1, n_grid)]) / dh
+        grad_p_y = (p[i, j] - p[i, cyclic_index(j - 1, ny)]) / dh
         v_out[i, j] = v_in[i, j] - grad_p_y
     else:
         # BC_WALL
@@ -442,7 +445,8 @@ def compute_velocity_loss(
     target_vx: wp.array2d(dtype=float),
     target_vy: wp.array2d(dtype=float),
     loss: wp.array(dtype=float),
-    n_grid: int
+    nx: int,
+    ny: int
 ):
     i, j = wp.tid()
     
@@ -450,7 +454,7 @@ def compute_velocity_loss(
     diff_y = vy[i, j] - target_vy[i, j]
     
     # Mean squared error
-    val = (diff_x * diff_x + diff_y * diff_y) / float(n_grid * n_grid)
+    val = (diff_x * diff_x + diff_y * diff_y) / float(nx * ny)
     
     wp.atomic_add(loss, 0, val)
 
@@ -458,7 +462,8 @@ def compute_velocity_loss(
 def enforce_noslip_velocity(
     u: wp.array2d(dtype=float),
     v: wp.array2d(dtype=float),
-    n_grid: int
+    nx: int,
+    ny: int
 ):
     """Explicitly zero out boundaries for wall BC."""
     i, j = wp.tid()
@@ -468,7 +473,7 @@ def enforce_noslip_velocity(
         u[i, j] = 0.0 # No penetration Left
         v[i, j] = 0.0 # No slip Left
         
-    if i == n_grid - 1:
+    if i == nx - 1:
         v[i, j] = 0.0 # No slip Right
         # u[N-1] is interior face, u[N] is wall. 
         # But for 'box' behavior, zeroing tangential near wall is good.
@@ -478,7 +483,7 @@ def enforce_noslip_velocity(
         v[i, j] = 0.0 # No penetration Bottom
         u[i, j] = 0.0 # No slip Bottom
         
-    if j == n_grid - 1:
+    if j == ny - 1:
         u[i, j] = 0.0 # No slip Top
 
 @wp.kernel
@@ -486,7 +491,8 @@ def enforce_mask_velocity(
     u: wp.array2d(dtype=float),
     v: wp.array2d(dtype=float),
     mask: wp.array2d(dtype=int),
-    n_grid: int
+    nx: int,
+    ny: int
 ):
     i, j = wp.tid()
     
@@ -496,18 +502,18 @@ def enforce_mask_velocity(
         # Left face
         u[i, j] = 0.0
         # Right face
-        if i < n_grid - 1:
+        if i < nx - 1:
              u[i+1, j] = 0.0
         
         # Bottom face
         v[i, j] = 0.0
         # Top face
-        if j < n_grid - 1:
+        if j < ny - 1:
             v[i, j+1] = 0.0
             
     # Also enforce domain boundaries
     if i == 0: u[i, j] = 0.0
-    if i == n_grid - 1: u[i+1, j] = 0.0 # Wait, array size is (N, N). u has shape (N,N)? 
+    if i == nx - 1: u[i+1, j] = 0.0 # Wait, array size is (N, N). u has shape (N,N)? 
 
     # if mask[i, j] == 0, zero its own stored faces (Left/Bottom)
     if mask[i, j] == 0:
@@ -540,14 +546,15 @@ def initialize_fields_3d(
     density: wp.array3d(dtype=float),
     u: wp.array3d(dtype=float),
     v: wp.array3d(dtype=float),
-    w: wp.array3d(dtype=float)
+    w: wp.array3d(dtype=float),
+    dh: float
 ):
     i, j, k = wp.tid()
     
     # Initialize density as a sphere in the center
-    x = (float(i) + 0.5) * DH
-    y = (float(j) + 0.5) * DH
-    z = (float(k) + 0.5) * DH
+    x = (float(i) + 0.5) * dh
+    y = (float(j) + 0.5) * dh
+    z = (float(k) + 0.5) * dh
     
     dx = x - CENTER_X
     dy = y - CENTER_Y
@@ -593,11 +600,11 @@ def apply_forces_3d(
     vz[i, j, k] = vz[i, j, k] + fz_sum * dt
 
 @wp.func
-def sample_field_3d(field: wp.array3d(dtype=float), x: float, y: float, z: float, n_grid: int):
+def sample_field_3d(field: wp.array3d(dtype=float), x: float, y: float, z: float, nx: int, ny: int, nz: int):
     # Trilinear interpolation
-    x = wp.max(0.0, wp.min(x, float(n_grid) - 1.0))
-    y = wp.max(0.0, wp.min(y, float(n_grid) - 1.0))
-    z = wp.max(0.0, wp.min(z, float(n_grid) - 1.0))
+    x = wp.max(0.0, wp.min(x, float(nx) - 1.0))
+    y = wp.max(0.0, wp.min(y, float(ny) - 1.0))
+    z = wp.max(0.0, wp.min(z, float(nz) - 1.0))
 
     x0 = wp.int32(wp.floor(x))
     y0 = wp.int32(wp.floor(y))
@@ -610,9 +617,9 @@ def sample_field_3d(field: wp.array3d(dtype=float), x: float, y: float, z: float
     wy0 = 1.0 - wy1
     wz0 = 1.0 - wz1
     
-    x1 = wp.min(x0 + 1, n_grid - 1)
-    y1 = wp.min(y0 + 1, n_grid - 1)
-    z1 = wp.min(z0 + 1, n_grid - 1)
+    x1 = wp.min(x0 + 1, nx - 1)
+    y1 = wp.min(y0 + 1, ny - 1)
+    z1 = wp.min(z0 + 1, nz - 1)
     
     # 8 corners
     c000 = field[x0, y0, z0]
@@ -645,7 +652,9 @@ def advect_mac_u_3d(
     v: wp.array3d(dtype=float),
     w: wp.array3d(dtype=float),
     u_new: wp.array3d(dtype=float),
-    n_grid: int,
+    nx: int,
+    ny: int,
+    nz: int,
     dh: float
 ):
     # u at (i, j+0.5, k+0.5)
@@ -666,14 +675,14 @@ def advect_mac_u_3d(
     grid_v_x = float(i) - 0.5
     grid_v_y = float(j) + 0.5
     grid_v_z = float(k)
-    vel_y = sample_field_3d(v, grid_v_x, grid_v_y, grid_v_z, n_grid)
+    vel_y = sample_field_3d(v, grid_v_x, grid_v_y, grid_v_z, nx, ny, nz)
     
     # w is at (i+0.5, j+0.5, k).
     # w grid coords: x_w = i - 0.5, y_w = j, z_w = k + 0.5
     grid_w_x = float(i) - 0.5
     grid_w_y = float(j)
     grid_w_z = float(k) + 0.5
-    vel_z = sample_field_3d(w, grid_w_x, grid_w_y, grid_w_z, n_grid)
+    vel_z = sample_field_3d(w, grid_w_x, grid_w_y, grid_w_z, nx, ny, nz)
     
     src_x = x - vel_x * dt
     src_y = y - vel_y * dt
@@ -684,7 +693,7 @@ def advect_mac_u_3d(
     grid_src_y = (src_y / dh) - 0.5
     grid_src_z = (src_z / dh) - 0.5
     
-    u_new[i, j, k] = sample_field_3d(u, grid_src_x, grid_src_y, grid_src_z, n_grid)
+    u_new[i, j, k] = sample_field_3d(u, grid_src_x, grid_src_y, grid_src_z, nx, ny, nz)
 
 @wp.kernel
 def advect_mac_v_3d(
@@ -693,7 +702,9 @@ def advect_mac_v_3d(
     v: wp.array3d(dtype=float),
     w: wp.array3d(dtype=float),
     v_new: wp.array3d(dtype=float),
-    n_grid: int,
+    nx: int,
+    ny: int,
+    nz: int,
     dh: float
 ):
     # v at (i+0.5, j, k+0.5)
@@ -711,14 +722,14 @@ def advect_mac_v_3d(
     grid_u_x = float(i) + 0.5
     grid_u_y = float(j) - 0.5
     grid_u_z = float(k)
-    vel_x = sample_field_3d(u, grid_u_x, grid_u_y, grid_u_z, n_grid)
+    vel_x = sample_field_3d(u, grid_u_x, grid_u_y, grid_u_z, nx, ny, nz)
     
     # w sample. w is at (i+0.5, j+0.5, k)
     # grid_w = (i, j-0.5, k+0.5)
     grid_w_x = float(i)
     grid_w_y = float(j) - 0.5
     grid_w_z = float(k) + 0.5
-    vel_z = sample_field_3d(w, grid_w_x, grid_w_y, grid_w_z, n_grid)
+    vel_z = sample_field_3d(w, grid_w_x, grid_w_y, grid_w_z, nx, ny, nz)
     
     src_x = x - vel_x * dt
     src_y = y - vel_y * dt
@@ -728,7 +739,7 @@ def advect_mac_v_3d(
     grid_src_y = src_y / dh
     grid_src_z = (src_z / dh) - 0.5
     
-    v_new[i, j, k] = sample_field_3d(v, grid_src_x, grid_src_y, grid_src_z, n_grid)
+    v_new[i, j, k] = sample_field_3d(v, grid_src_x, grid_src_y, grid_src_z, nx, ny, nz)
 
 @wp.kernel
 def advect_mac_w_3d(
@@ -737,7 +748,9 @@ def advect_mac_w_3d(
     v: wp.array3d(dtype=float),
     w: wp.array3d(dtype=float),
     w_new: wp.array3d(dtype=float),
-    n_grid: int,
+    nx: int,
+    ny: int,
+    nz: int,
     dh: float
 ):
     # w at (i+0.5, j+0.5, k)
@@ -755,14 +768,14 @@ def advect_mac_w_3d(
     grid_u_x = float(i) + 0.5
     grid_u_y = float(j)
     grid_u_z = float(k) - 0.5
-    vel_x = sample_field_3d(u, grid_u_x, grid_u_y, grid_u_z, n_grid)
+    vel_x = sample_field_3d(u, grid_u_x, grid_u_y, grid_u_z, nx, ny, nz)
     
     # v sample. v is at (i+0.5, j, k+0.5)
     # grid_v = (i, j+0.5, k-0.5)
     grid_v_x = float(i)
     grid_v_y = float(j) + 0.5
     grid_v_z = float(k) - 0.5
-    vel_y = sample_field_3d(v, grid_v_x, grid_v_y, grid_v_z, n_grid)
+    vel_y = sample_field_3d(v, grid_v_x, grid_v_y, grid_v_z, nx, ny, nz)
     
     src_x = x - vel_x * dt
     src_y = y - vel_y * dt
@@ -772,7 +785,7 @@ def advect_mac_w_3d(
     grid_src_y = (src_y / dh) - 0.5
     grid_src_z = src_z / dh
     
-    w_new[i, j, k] = sample_field_3d(w, grid_src_x, grid_src_y, grid_src_z, n_grid)
+    w_new[i, j, k] = sample_field_3d(w, grid_src_x, grid_src_y, grid_src_z, nx, ny, nz)
 
 @wp.kernel
 def advect_density_3d(
@@ -783,7 +796,9 @@ def advect_density_3d(
     rho_old: wp.array3d(dtype=float),
     rho_new: wp.array3d(dtype=float),
     bc_type: int,
-    n_grid: int,
+    nx: int,
+    ny: int,
+    nz: int,
     dh: float
 ):
     i, j, k = wp.tid()
@@ -798,26 +813,26 @@ def advect_density_3d(
     w_c = float(0.0)
     
     if bc_type == BC_PERIODIC:
-        u_c = (u[i, j, k] + u[cyclic_index(i+1, n_grid), j, k]) * 0.5
-        v_c = (v[i, j, k] + v[i, cyclic_index(j+1, n_grid), k]) * 0.5
-        w_c = (w[i, j, k] + w[i, j, cyclic_index(k+1, n_grid)]) * 0.5
+        u_c = (u[i, j, k] + u[cyclic_index(i+1, nx), j, k]) * 0.5
+        v_c = (v[i, j, k] + v[i, cyclic_index(j+1, ny), k]) * 0.5
+        w_c = (w[i, j, k] + w[i, j, cyclic_index(k+1, nz)]) * 0.5
     else:
         # BC_WALL
         # Check bounds
         u1 = float(0.0)
-        if i == n_grid-1:
+        if i == nx-1:
             u1 = 0.0 
         else:
             u1 = u[i+1, j, k]
             
         v1 = float(0.0)
-        if j == n_grid-1:
+        if j == ny-1:
             v1 = 0.0
         else:
             v1 = v[i, j+1, k]
             
         w1 = float(0.0)
-        if k == n_grid-1:
+        if k == nz-1:
             w1 = 0.0 
         else:
             w1 = w[i, j, k+1]
@@ -834,10 +849,10 @@ def advect_density_3d(
     grid_src_y = (src_y / dh) - 0.5
     grid_src_z = (src_z / dh) - 0.5
     
-    rho_new[i, j, k] = sample_field_3d(rho_old, grid_src_x, grid_src_y, grid_src_z, n_grid)
+    rho_new[i, j, k] = sample_field_3d(rho_old, grid_src_x, grid_src_y, grid_src_z, nx, ny, nz)
 
 @wp.kernel
-def divergence_3d(u: wp.array3d(dtype=float), v: wp.array3d(dtype=float), w: wp.array3d(dtype=float), mask: wp.array3d(dtype=int), div: wp.array3d(dtype=float), n_grid: int, dh: float):
+def divergence_3d(u: wp.array3d(dtype=float), v: wp.array3d(dtype=float), w: wp.array3d(dtype=float), mask: wp.array3d(dtype=int), div: wp.array3d(dtype=float), nx: int, ny: int, nz: int, dh: float):
     i, j, k = wp.tid()
     
     if mask[i, j, k] == 0:
@@ -851,17 +866,17 @@ def divergence_3d(u: wp.array3d(dtype=float), v: wp.array3d(dtype=float), w: wp.
     w_f = float(0.0)
     w_k = w[i, j, k]
     
-    if i == n_grid-1:
+    if i == nx-1:
         u_r = 0.0 
     else:
         u_r = u[i+1, j, k]
         
-    if j == n_grid-1:
+    if j == ny-1:
         v_t = 0.0 
     else:
         v_t = v[i, j+1, k]
         
-    if k == n_grid-1:
+    if k == nz-1:
         w_f = 0.0 
     else:
         w_f = w[i, j, k+1]
@@ -870,7 +885,7 @@ def divergence_3d(u: wp.array3d(dtype=float), v: wp.array3d(dtype=float), w: wp.
 
 
 @wp.kernel
-def jacobi_iter_3d(div: wp.array3d(dtype=float), p0: wp.array3d(dtype=float), mask: wp.array3d(dtype=int), p1: wp.array3d(dtype=float), n_grid: int, dh: float):
+def jacobi_iter_3d(div: wp.array3d(dtype=float), p0: wp.array3d(dtype=float), mask: wp.array3d(dtype=int), p1: wp.array3d(dtype=float), nx: int, ny: int, nz: int, dh: float):
     i, j, k = wp.tid()
     
     if mask[i, j, k] == 0:
@@ -893,7 +908,7 @@ def jacobi_iter_3d(div: wp.array3d(dtype=float), p0: wp.array3d(dtype=float), ma
         val_l = p0[i-1, j, k]
         
     # Right
-    if i == n_grid-1:
+    if i == nx-1:
         val_r = p0[i, j, k]
     elif mask[i+1, j, k] == 0:
         val_r = p0[i, j, k]
@@ -909,7 +924,7 @@ def jacobi_iter_3d(div: wp.array3d(dtype=float), p0: wp.array3d(dtype=float), ma
         val_d = p0[i, j-1, k]
         
     # Up
-    if j == n_grid-1:
+    if j == ny-1:
         val_u = p0[i, j, k]
     elif mask[i, j+1, k] == 0:
         val_u = p0[i, j, k]
@@ -925,7 +940,7 @@ def jacobi_iter_3d(div: wp.array3d(dtype=float), p0: wp.array3d(dtype=float), ma
         val_b = p0[i, j, k-1]
         
     # Front
-    if k == n_grid-1:
+    if k == nz-1:
         val_f = p0[i, j, k]
     elif mask[i, j, k+1] == 0:
         val_f = p0[i, j, k]
@@ -945,19 +960,21 @@ def update_velocities_3d(
     v_out: wp.array3d(dtype=float),
     w_out: wp.array3d(dtype=float),
     bc_type: int,
-    n_grid: int,
+    nx: int,
+    ny: int,
+    nz: int,
     dh: float
 ):
     i, j, k = wp.tid()
     
     if bc_type == BC_PERIODIC:
-        grad_p_x = (p[i, j, k] - p[cyclic_index(i-1, n_grid), j, k]) / dh
+        grad_p_x = (p[i, j, k] - p[cyclic_index(i-1, nx), j, k]) / dh
         u_out[i, j, k] = u_in[i, j, k] - grad_p_x
         
-        grad_p_y = (p[i, j, k] - p[i, cyclic_index(j-1, n_grid), k]) / dh
+        grad_p_y = (p[i, j, k] - p[i, cyclic_index(j-1, ny), k]) / dh
         v_out[i, j, k] = v_in[i, j, k] - grad_p_y
         
-        grad_p_z = (p[i, j, k] - p[i, j, cyclic_index(k-1, n_grid)]) / dh
+        grad_p_z = (p[i, j, k] - p[i, j, cyclic_index(k-1, nz)]) / dh
         w_out[i, j, k] = w_in[i, j, k] - grad_p_z
     else:
         if i == 0:
@@ -987,7 +1004,9 @@ def compute_velocity_loss_3d(
     target_vy: wp.array3d(dtype=float),
     target_vz: wp.array3d(dtype=float),
     loss: wp.array(dtype=float),
-    n_grid: int
+    nx: int,
+    ny: int,
+    nz: int
 ):
     i, j, k = wp.tid()
     
@@ -995,7 +1014,7 @@ def compute_velocity_loss_3d(
     diff_y = vy[i, j, k] - target_vy[i, j, k]
     diff_z = vz[i, j, k] - target_vz[i, j, k]
     
-    val = (diff_x * diff_x + diff_y * diff_y + diff_z * diff_z) / float(n_grid * n_grid * n_grid)
+    val = (diff_x * diff_x + diff_y * diff_y + diff_z * diff_z) / float(nx * ny * nz)
     wp.atomic_add(loss, 0, val)
 
 @wp.kernel
@@ -1003,7 +1022,9 @@ def enforce_noslip_velocity_3d(
     u: wp.array3d(dtype=float),
     v: wp.array3d(dtype=float),
     w: wp.array3d(dtype=float),
-    n_grid: int
+    nx: int,
+    ny: int,
+    nz: int
 ):
     i, j, k = wp.tid()
     
@@ -1012,7 +1033,7 @@ def enforce_noslip_velocity_3d(
         u[i, j, k] = 0.0 # No pen
         v[i, j, k] = 0.0 # No slip
         w[i, j, k] = 0.0 # No slip
-    elif i == n_grid - 1:
+    elif i == nx - 1:
         v[i, j, k] = 0.0 # No slip
         w[i, j, k] = 0.0 # No slip
         
@@ -1021,7 +1042,7 @@ def enforce_noslip_velocity_3d(
         v[i, j, k] = 0.0 # No pen
         u[i, j, k] = 0.0 # No slip
         w[i, j, k] = 0.0 # No slip
-    elif j == n_grid - 1:
+    elif j == ny - 1:
         u[i, j, k] = 0.0 # No slip
         w[i, j, k] = 0.0 # No slip
         
@@ -1030,7 +1051,7 @@ def enforce_noslip_velocity_3d(
         w[i, j, k] = 0.0 # No pen
         u[i, j, k] = 0.0 # No slip
         v[i, j, k] = 0.0 # No slip
-    elif k == n_grid - 1:
+    elif k == nz - 1:
         u[i, j, k] = 0.0 # No slip
         v[i, j, k] = 0.0 # No slip
 
@@ -1040,7 +1061,9 @@ def enforce_mask_velocity_3d(
     v: wp.array3d(dtype=float),
     w: wp.array3d(dtype=float),
     mask: wp.array3d(dtype=int),
-    n_grid: int
+    nx: int,
+    ny: int,
+    nz: int
 ):
     i, j, k = wp.tid()
     
@@ -1077,16 +1100,39 @@ class FluidOptimizer:
         self.num_basis_fields = num_basis_fields
         self.sim_steps = sim_steps
         self.pressure_iterations = pressure_iterations
-        self.n_grid = n_grid
-        self.dh = 1.0 / n_grid
-        self.dt = DT # Keep global DT for now? User didn't ask to change DT.
+        self.dt = DT 
         self.dim = dim
+        
+        # Parse n_grid
+        if isinstance(n_grid, int):
+            self.nx = n_grid
+            self.ny = n_grid
+            self.nz = n_grid if dim == 3 else 1
+        else:
+            # Tuple
+            if dim == 2:
+                if len(n_grid) != 2:
+                    raise ValueError("n_grid must be len 2 for 2D")
+                self.nx = n_grid[0]
+                self.ny = n_grid[1]
+                self.nz = 1
+            else:
+                if len(n_grid) != 3:
+                     raise ValueError("n_grid must be len 3 for 3D")
+                self.nx = n_grid[0]
+                self.ny = n_grid[1]
+                self.nz = n_grid[2]
+
+        self.n_grid = n_grid # Keep for ref but logic should use nx, ny, nz
+        
+        # DH derived from X dim. Assuming domain width X=1.0.
+        self.dh = 1.0 / self.nx
         
         # Grid shape
         if self.dim == 2:
-            self.shape = (self.n_grid, self.n_grid)
+            self.shape = (self.nx, self.ny)
         else:
-            self.shape = (self.n_grid, self.n_grid, self.n_grid)
+            self.shape = (self.nx, self.ny, self.nz)
             
         # Mask
         self.mask = wp.ones(self.shape, dtype=int, device=self.device) # Default all 1 (Fluid)
@@ -1122,12 +1168,12 @@ class FluidOptimizer:
         # Basis Fields 
         rng = np.random.default_rng(42)
         
-        # We'll use 4D array [num_basis, N, N, N] for 3D basis fields or [num_basis, N, N] for 2D
+        # We'll use 4D array [num_basis, nx, ny, nz] for 3D basis fields or [num_basis, nx, ny] for 2D
         
         if self.dim == 2:
-             basis_shape_np = (num_basis_fields, self.n_grid, self.n_grid)
+             basis_shape_np = (num_basis_fields, self.nx, self.ny)
         else:
-             basis_shape_np = (num_basis_fields, self.n_grid, self.n_grid, self.n_grid)
+             basis_shape_np = (num_basis_fields, self.nx, self.ny, self.nz)
 
         self.basis_fx_np = np.zeros(basis_shape_np, dtype=np.float32)
         self.basis_fy_np = np.zeros(basis_shape_np, dtype=np.float32)
@@ -1148,8 +1194,8 @@ class FluidOptimizer:
             if self.dim == 2:
                  # existing 2D generation
                 phase_x = rng.uniform(0, 2*np.pi)
-                for y in range(self.n_grid):
-                    for x in range(self.n_grid):
+                for y in range(self.ny):
+                    for x in range(self.nx):
                         yf = y * self.dh
                         xf = x * self.dh
                         self.basis_fx_np[k, y, x] = np.sin(xf * freq_x + phase_x) * np.cos(yf * freq_y)
@@ -1157,9 +1203,9 @@ class FluidOptimizer:
             else:
                 # 3D generation
                 phase_x = rng.uniform(0, 2*np.pi)
-                for z in range(self.n_grid):
-                    for y in range(self.n_grid):
-                        for x in range(self.n_grid):
+                for z in range(self.nz):
+                    for y in range(self.ny):
+                        for x in range(self.nx):
                             zf = z * self.dh
                             yf = y * self.dh
                             xf = x * self.dh
@@ -1206,68 +1252,68 @@ class FluidOptimizer:
         """Execute one simulation step t -> t+1."""
         if self.dim == 2:
             # 1. Advect Velocities (Self-Advection)
-            wp.launch(advect_mac_u, self.shape, inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.wx_arrays[t], self.n_grid, self.dh])
-            wp.launch(advect_mac_v, self.shape, inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.wy_arrays[t], self.n_grid, self.dh])
+            wp.launch(advect_mac_u, self.shape, inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.wx_arrays[t], self.nx, self.ny, self.dh])
+            wp.launch(advect_mac_v, self.shape, inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.wy_arrays[t], self.nx, self.ny, self.dh])
             
             # Enforce mask velocity (zero solid faces)
-            wp.launch(enforce_mask_velocity, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.mask, self.n_grid])
+            wp.launch(enforce_mask_velocity, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.mask, self.nx, self.ny])
             
             if self.bc_type == BoundaryCondition.WALL:
-                wp.launch(enforce_noslip_velocity, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.n_grid])
+                wp.launch(enforce_noslip_velocity, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.nx, self.ny])
                 
             # 2. Apply Forces
             wp.launch(apply_forces, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.basis_fx, self.basis_fy, self.weights, self.dt])
             
             # Enforce mask velocity again? Forces might add velocity in solid.
-            wp.launch(enforce_mask_velocity, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.mask, self.n_grid])
+            wp.launch(enforce_mask_velocity, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.mask, self.nx, self.ny])
 
             # 3. Pressure
-            wp.launch(divergence, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.mask, self.div_arrays[t], self.n_grid, self.dh])
+            wp.launch(divergence, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.mask, self.div_arrays[t], self.nx, self.ny, self.dh])
             
             self.pressure_arrays[t][0].zero_()
             for k in range(self.pressure_iterations):
-                wp.launch(jacobi_iter, self.shape, inputs=[self.div_arrays[t], self.pressure_arrays[t][k], self.mask, self.pressure_arrays[t][k+1], self.n_grid, self.dh])
+                wp.launch(jacobi_iter, self.shape, inputs=[self.div_arrays[t], self.pressure_arrays[t][k], self.mask, self.pressure_arrays[t][k+1], self.nx, self.ny, self.dh])
                 
             final_p_idx = self.pressure_iterations
-            wp.launch(update_velocities, self.shape, inputs=[self.pressure_arrays[t][final_p_idx], self.wx_arrays[t], self.wy_arrays[t], self.vx_arrays[t+1], self.vy_arrays[t+1], self.bc_type.value, self.n_grid, self.dh])
+            wp.launch(update_velocities, self.shape, inputs=[self.pressure_arrays[t][final_p_idx], self.wx_arrays[t], self.wy_arrays[t], self.vx_arrays[t+1], self.vy_arrays[t+1], self.bc_type.value, self.nx, self.ny, self.dh])
             
             # Enforce mask velocity final
-            wp.launch(enforce_mask_velocity, self.shape, inputs=[self.vx_arrays[t+1], self.vy_arrays[t+1], self.mask, self.n_grid])
+            wp.launch(enforce_mask_velocity, self.shape, inputs=[self.vx_arrays[t+1], self.vy_arrays[t+1], self.mask, self.nx, self.ny])
             
             # 4. Advect Density
-            wp.launch(advect_density, self.shape, inputs=[self.dt, self.vx_arrays[t+1], self.vy_arrays[t+1], self.density_arrays[t], self.density_arrays[t+1], self.bc_type.value, self.n_grid, self.dh])
+            wp.launch(advect_density, self.shape, inputs=[self.dt, self.vx_arrays[t+1], self.vy_arrays[t+1], self.density_arrays[t], self.density_arrays[t+1], self.bc_type.value, self.nx, self.ny, self.dh])
             
         else:
             # 3D
             inputs_uvw = [self.dt, self.vx_arrays[t], self.vy_arrays[t], self.vz_arrays[t]]
-            wp.launch(advect_mac_u_3d, self.shape, inputs=inputs_uvw + [self.wx_arrays[t], self.n_grid, self.dh])
-            wp.launch(advect_mac_v_3d, self.shape, inputs=inputs_uvw + [self.wy_arrays[t], self.n_grid, self.dh])
-            wp.launch(advect_mac_w_3d, self.shape, inputs=inputs_uvw + [self.wz_arrays[t], self.n_grid, self.dh])
+            wp.launch(advect_mac_u_3d, self.shape, inputs=inputs_uvw + [self.wx_arrays[t], self.nx, self.ny, self.nz, self.dh])
+            wp.launch(advect_mac_v_3d, self.shape, inputs=inputs_uvw + [self.wy_arrays[t], self.nx, self.ny, self.nz, self.dh])
+            wp.launch(advect_mac_w_3d, self.shape, inputs=inputs_uvw + [self.wz_arrays[t], self.nx, self.ny, self.nz, self.dh])
             
             # Enforce mask
-            wp.launch(enforce_mask_velocity_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.mask, self.n_grid])
+            wp.launch(enforce_mask_velocity_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.mask, self.nx, self.ny, self.nz])
             
             if self.bc_type == BoundaryCondition.WALL:
-                wp.launch(enforce_noslip_velocity_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.n_grid])
+                wp.launch(enforce_noslip_velocity_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.nx, self.ny, self.nz])
                 
             wp.launch(apply_forces_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.basis_fx, self.basis_fy, self.basis_fz, self.weights, self.dt])
             
             # Enforce mask again
-            wp.launch(enforce_mask_velocity_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.mask, self.n_grid])
+            wp.launch(enforce_mask_velocity_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.mask, self.nx, self.ny, self.nz])
 
-            wp.launch(divergence_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.mask, self.div_arrays[t], self.n_grid, self.dh])
+            wp.launch(divergence_3d, self.shape, inputs=[self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.mask, self.div_arrays[t], self.nx, self.ny, self.nz, self.dh])
             
             self.pressure_arrays[t][0].zero_()
             for k in range(self.pressure_iterations):
-                wp.launch(jacobi_iter_3d, self.shape, inputs=[self.div_arrays[t], self.pressure_arrays[t][k], self.mask, self.pressure_arrays[t][k+1], self.n_grid, self.dh])
+                wp.launch(jacobi_iter_3d, self.shape, inputs=[self.div_arrays[t], self.pressure_arrays[t][k], self.mask, self.pressure_arrays[t][k+1], self.nx, self.ny, self.nz, self.dh])
                 
             final_p_idx = self.pressure_iterations
-            wp.launch(update_velocities_3d, self.shape, inputs=[self.pressure_arrays[t][final_p_idx], self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.vx_arrays[t+1], self.vy_arrays[t+1], self.vz_arrays[t+1], self.bc_type.value, self.n_grid, self.dh])
+            wp.launch(update_velocities_3d, self.shape, inputs=[self.pressure_arrays[t][final_p_idx], self.wx_arrays[t], self.wy_arrays[t], self.wz_arrays[t], self.vx_arrays[t+1], self.vy_arrays[t+1], self.vz_arrays[t+1], self.bc_type.value, self.nx, self.ny, self.nz, self.dh])
             
             # Enforce mask final
-            wp.launch(enforce_mask_velocity_3d, self.shape, inputs=[self.vx_arrays[t+1], self.vy_arrays[t+1], self.vz_arrays[t+1], self.mask, self.n_grid])
+            wp.launch(enforce_mask_velocity_3d, self.shape, inputs=[self.vx_arrays[t+1], self.vy_arrays[t+1], self.vz_arrays[t+1], self.mask, self.nx, self.ny, self.nz])
             
-            wp.launch(advect_density_3d, self.shape, inputs=[self.dt, self.vx_arrays[t+1], self.vy_arrays[t+1], self.vz_arrays[t+1], self.density_arrays[t], self.density_arrays[t+1], self.bc_type.value, self.n_grid, self.dh])
+            wp.launch(advect_density_3d, self.shape, inputs=[self.dt, self.vx_arrays[t+1], self.vy_arrays[t+1], self.vz_arrays[t+1], self.density_arrays[t], self.density_arrays[t+1], self.bc_type.value, self.nx, self.ny, self.nz, self.dh])
 
     def clear_all_gradients(self):
         """Manually zero gradients of all state arrays to prevent accumulation."""
@@ -1313,7 +1359,8 @@ class FluidOptimizer:
                         self.target_vx_arrays[t], # Corresponding target frame
                         self.target_vy_arrays[t], 
                         self.loss,
-                        self.n_grid
+                        self.nx,
+                        self.ny
                     ]
                 )
             else:
@@ -1328,7 +1375,9 @@ class FluidOptimizer:
                         self.target_vy_arrays[t],
                         self.target_vz_arrays[t],
                         self.loss,
-                        self.n_grid
+                        self.nx,
+                        self.ny,
+                        self.nz
                     ]
                 )
         
@@ -1374,9 +1423,9 @@ class FluidOptimizer:
         weights_np = self.weights.numpy()
         
         if self.dim == 2:
-             basis_shape = (self.n_grid, self.n_grid)
+             basis_shape = (self.nx, self.ny)
         else:
-             basis_shape = (self.n_grid, self.n_grid, self.n_grid)
+             basis_shape = (self.nx, self.ny, self.nz)
 
         # basis arrays are always loaded in __init__
         basis_fx_np = self.basis_fx_np
