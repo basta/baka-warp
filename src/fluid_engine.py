@@ -175,11 +175,11 @@ def compute_velocity_loss(
 
 
 class FluidOptimizer:
-    def __init__(self, num_basis_fields=5, sim_steps=50, device=None):
+    def __init__(self, num_basis_fields=5, sim_steps=50, pressure_iterations=20, device=None):
         self.device = device if device else wp.get_device()
         self.num_basis_fields = num_basis_fields
         self.sim_steps = sim_steps
-        self.pressure_iterations = 20
+        self.pressure_iterations = pressure_iterations
         self.dt = DT
         
         # ---------------------------------------------------------------------
