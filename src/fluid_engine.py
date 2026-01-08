@@ -929,12 +929,8 @@ class FluidOptimizer:
         else:
             self.shape = (N_GRID, N_GRID, N_GRID)
             
-        # ---------------------------------------------------------------------
-        # Create Data Arrays
-        # ---------------------------------------------------------------------
-        
-        # We need to store full trajectory for backprop
-        
+
+        # We need to store full trajectory for backprop        
         self.vx_arrays = [wp.zeros(self.shape, dtype=float, device=self.device, requires_grad=True) for _ in range(sim_steps + 1)]
         self.vy_arrays = [wp.zeros(self.shape, dtype=float, device=self.device, requires_grad=True) for _ in range(sim_steps + 1)]
         
@@ -961,9 +957,7 @@ class FluidOptimizer:
             step_pressures = [wp.zeros(self.shape, dtype=float, device=self.device, requires_grad=True) for _ in range(self.pressure_iterations + 1)]
             self.pressure_arrays.append(step_pressures)
             
-        # ---------------------------------------------------------------------
         # Basis Fields 
-        # ---------------------------------------------------------------------
         rng = np.random.default_rng(42)
         
         # We'll use 4D array [num_basis, N, N, N] for 3D basis fields or [num_basis, N, N] for 2D
