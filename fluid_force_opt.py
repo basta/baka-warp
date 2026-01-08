@@ -8,25 +8,20 @@ import numpy as np
 import warp as wp
 import warp.optim
 
-try:
-    from PIL import Image
-    PILLOW_AVAILABLE = True
-except ImportError:
-    PILLOW_AVAILABLE = False
+from PIL import Image
 
-try:
-    import matplotlib
-    import matplotlib.pyplot as plt
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
+
+import matplotlib
+import matplotlib.pyplot as plt
+
+
 
 # Grid dimensions
-N_GRID = 128
+N_GRID = 64
 DH = 1.0 / N_GRID
 
 # Simulation parameters
-DT = 0.01  # Reduced for stability
+DT = 0.005  # Reduced further
 DENSITY_INIT_RADIUS = 0.1
 CENTER_X = 0.5
 CENTER_Y = 0.5
@@ -257,16 +252,12 @@ class FluidOptimizer:
         # Learnable Weights
         self.weights = wp.zeros(num_basis_fields, dtype=float, device=self.device, requires_grad=True)
 
-        # Loss
-        self.loss = wp.zeros(1, dtype=float, device=self.device, requires_grad=True)
-        
         # Target Velocity (placeholder, will set later)
-        self.target_vx = wp.zeros((N_GRID, N_GRID), dtype=float, device=self.device)
-        self.target_vy = wp.zeros((N_GRID, N_GRID), dtype=float, device=self.device)
+        self.target_vx_arrays = [wp.zeros((N_GRID, N_GRID), dtype=float, device=self.device) for _ in range(sim_steps)]
+        self.target_vy_arrays = [wp.zeros((N_GRID, N_GRID), dtype=float, device=self.device) for _ in range(sim_steps)]
 
-        # Optimizer
-        self.optimizer = warp.optim.Adam([self.weights], lr=0.1)
-        self.tape = wp.Tape()
+        self.loss = wp.zeros(1, dtype=float, device=self.device, requires_grad=True)
+        self.optimizer = warp.optim.Adam([self.weights], lr=0.01) # Raised LR slightly as gradients will be more stable
 
     def run_step(self, t):
         """Execute one simulation step t -> t+1."""
@@ -322,27 +313,56 @@ class FluidOptimizer:
             outputs=[self.density_arrays[t+1]]
         )
 
+    def clear_all_gradients(self):
+        """Manually zero gradients of all state arrays to prevent accumulation."""
+        self.weights.grad.zero_()
+        self.loss.grad.zero_()
+        
+        # Helper to zero a list of arrays
+        def zero_list(arr_list):
+            for arr in arr_list:
+                if arr.requires_grad:
+                    arr.grad.zero_()
+        
+        zero_list(self.vx_arrays)
+        zero_list(self.vy_arrays)
+        zero_list(self.density_arrays)
+        zero_list(self.wx_arrays)
+        zero_list(self.wy_arrays)
+        zero_list(self.div_arrays)
+        
+        # Pressure is a list of lists
+        for step_list in self.pressure_arrays:
+            zero_list(step_list)
+
     def forward(self):
         # Reset state (only t=0 is fixed)
         # We assume vx[0], vy[0], density[0] are set.
-        
-        with self.tape:
-            for t in range(self.sim_steps):
-                self.run_step(t)
-                
-            # Compute Loss
+
+        self.loss.zero_()
+
+        for t in range(self.sim_steps):
+            self.run_step(t)
             wp.launch(
                 compute_velocity_loss,
                 (N_GRID, N_GRID),
-                inputs=[self.vx_arrays[-1], self.vy_arrays[-1], self.target_vx, self.target_vy],
-                outputs=[self.loss]
+                inputs=[
+                    self.vx_arrays[t+1],      # Current simulation state
+                    self.vy_arrays[t+1], 
+                    self.target_vx_arrays[t], # Corresponding target frame
+                    self.target_vy_arrays[t], 
+                    self.loss
+                ]
             )
-            
+        
     def step_optimization(self):
-        self.tape.zero()
+        self.clear_all_gradients()
+        self.weights.grad.zero_()
+        self.tape = wp.Tape()
         self.loss.zero_()
         
-        self.forward()
+        with self.tape:
+            self.forward()
         
         self.tape.backward(self.loss)
         
@@ -350,14 +370,13 @@ class FluidOptimizer:
         grad_np = self.weights.grad.numpy()
         
         if not np.all(np.isfinite(grad_np)):
-            print("  [Warning] Gradients contain NaN/Inf! Skipping step.")
-            # Zero out grads to avoid polluting optimizer
+            print("  [Warning] Gradients contain NaN/Inf! Zeroing grads.")
             self.weights.grad.zero_()
             return self.loss.numpy()[0], float('nan')
 
         grad_norm = np.linalg.norm(grad_np)
         
-        max_grad_norm = 0.5  # Stricter clip
+        max_grad_norm = 1.0
         if grad_norm > max_grad_norm:
             scale = max_grad_norm / (grad_norm + 1e-6)
             grad_np = grad_np * scale
@@ -375,7 +394,7 @@ def main():
     print(f"Running on device: {device}")
 
     # Reduce horizon for stability
-    num_steps = 20
+    num_steps = 15
     num_bases = 8
     
     # Create Optimizer/Sim
@@ -385,24 +404,20 @@ def main():
     # 1. Generate a "Target" by running with secret weights
     # -------------------------------------------------------------------------
     print("Generating target trajectory...")
-    # Smaller weights for stability
-    true_weights_np = np.random.uniform(-0.1, 0.1, size=(num_bases,)).astype(np.float32)
-    true_weights_wp = wp.array(true_weights_np, dtype=float, device=device)
+    true_weights_np = np.random.uniform(-0.1, 0.1, size=(8,)).astype(np.float32)
+    wp.copy(sim.weights, wp.array(true_weights_np, dtype=float, device=device))
     
-    # Assign true weights temporarily
-    wp.copy(sim.weights, true_weights_wp)
-    
-    # Initialize state
+    # Init state
     wp.launch(initialize_fields, (N_GRID, N_GRID), inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]])
     
-    # Run forward
-    sim.forward()
-    
-    # Copy result to target
-    wp.copy(sim.target_vx, sim.vx_arrays[-1])
-    wp.copy(sim.target_vy, sim.vy_arrays[-1])
-    
-    print(f"Target generated with weights: {true_weights_np}")
+    # Run forward manually to capture frames
+    for t in range(sim.sim_steps):
+        sim.run_step(t)
+        # Copy THIS step's result to the target buffer
+        wp.copy(sim.target_vx_arrays[t], sim.vx_arrays[t+1])
+        wp.copy(sim.target_vy_arrays[t], sim.vy_arrays[t+1])
+        
+    print(f"Target generated.")
     
     # -------------------------------------------------------------------------
     # 2. Reset and Optimize
@@ -412,24 +427,22 @@ def main():
     # Reset weights to zero
     sim.weights.zero_()
     # Lower LR
-    sim.optimizer = warp.optim.Adam([sim.weights], lr=0.005)
+    sim.optimizer = warp.optim.Adam([sim.weights], lr=0.001)
     
     # Training Loop
     iterations = 200
     for i in range(iterations):
         # Reset State for training
         wp.launch(initialize_fields, (N_GRID, N_GRID), inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]])
-
+        
         loss_val, grad_norm = sim.step_optimization()
         
-        if math.isnan(loss_val):
-            print(f"Iter {i:03d} | Loss is NaN! Stopping.")
+        if math.isnan(grad_norm):
+            print("Optimization unstable.")
             break
-
-        if i % 10 == 0:
-            current_weights = sim.weights.numpy()
-            w_err = np.linalg.norm(current_weights - true_weights_np)
-            print(f"Iter {i:03d} | Loss: {loss_val:.6f} | Weights Error: {w_err:.4f} | Grad Norm: {grad_norm:.4f}")
+            
+        if i % 1 == 0:
+            print(f"Iter {i:03d} | Loss: {loss_val:.6f} | Grad: {grad_norm:.4f}")
 
     print("\nOptimization Complete.")
     final_weights = sim.weights.numpy()
@@ -437,23 +450,22 @@ def main():
     print(f"Found Weights: {final_weights}")
     
     # verify
-    if MATPLOTLIB_AVAILABLE:
-        # Run one last updated forward
-        wp.launch(initialize_fields, (N_GRID, N_GRID), inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]])
-        sim.forward()
-        v_final_x = sim.vx_arrays[-1].numpy()
-        v_final_y = sim.vy_arrays[-1].numpy()
-        v_final_norm = np.sqrt(v_final_x**2 + v_final_y**2)
-        
-        try:
-            plt.figure(figsize=(10, 5))
-            plt.subplot(1, 2, 2)
-            plt.title("Optimized Velocity Magnitude")
-            plt.imshow(v_final_norm, origin="lower")
-            plt.savefig("optimization_result.png")
-            print("Result saved to optimization_result.png")
-        except Exception as e:
-            print(f"Failed to save plot: {e}")
+    # Run one last updated forward
+    wp.launch(initialize_fields, (N_GRID, N_GRID), inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]])
+    sim.forward()
+    v_final_x = sim.vx_arrays[-1].numpy()
+    v_final_y = sim.vy_arrays[-1].numpy()
+    v_final_norm = np.sqrt(v_final_x**2 + v_final_y**2)
+    
+    try:
+        plt.figure(figsize=(10, 5))
+        plt.subplot(1, 2, 2)
+        plt.title("Optimized Velocity Magnitude")
+        plt.imshow(v_final_norm, origin="lower")
+        plt.savefig("optimization_result.png")
+        print("Result saved to optimization_result.png")
+    except Exception as e:
+        print(f"Failed to save plot: {e}")
 
 if __name__ == "__main__":
     main()
