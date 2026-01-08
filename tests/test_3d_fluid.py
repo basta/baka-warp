@@ -35,7 +35,14 @@ def main():
     wp.launch(
         initialize_fields_3d,
         sim.shape,
-        inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0], sim.vz_arrays[0]]
+        inputs=[
+            sim.density_arrays[0],
+            sim.vx_arrays[0],
+            sim.vy_arrays[0],
+            sim.vz_arrays[0],
+            sim.n_grid,
+            sim.dh
+        ]
     )
     wp.synchronize()
     

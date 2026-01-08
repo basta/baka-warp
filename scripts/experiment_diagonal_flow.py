@@ -93,10 +93,15 @@ def main():
         # Reset init state (density circle, 0 velocity)
         wp.launch(
             initialize_fields, 
-            (N_GRID, N_GRID), 
-            inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]]
+            sim.shape, 
+            inputs=[
+                sim.density_arrays[0], 
+                sim.vx_arrays[0], 
+                sim.vy_arrays[0],
+                sim.n_grid,
+                sim.dh
+            ]
         )
-        
         loss_val, grad_norm = sim.step_optimization()
         
         if math.isnan(grad_norm):
@@ -115,8 +120,14 @@ def main():
     # Run with optimized weights
     wp.launch(
         initialize_fields, 
-        (N_GRID, N_GRID), 
-        inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]]
+        sim.shape, 
+        inputs=[
+            sim.density_arrays[0], 
+            sim.vx_arrays[0], 
+            sim.vy_arrays[0],
+            sim.n_grid,
+            sim.dh
+        ]
     )
     sim.forward()
     

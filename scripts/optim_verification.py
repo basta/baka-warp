@@ -32,7 +32,7 @@ def main():
     wp.copy(sim.weights, wp.array(true_weights_np, dtype=float, device=device))
     
     # Init state
-    wp.launch(initialize_fields, (N_GRID, N_GRID), inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]])
+    wp.launch(initialize_fields, sim.shape, inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0], sim.n_grid, sim.dh])
     
     # Run forward manually to capture frames
     for t in range(sim.sim_steps):
@@ -57,7 +57,7 @@ def main():
     iterations = 200
     for i in range(iterations):
         # Reset State for training
-        wp.launch(initialize_fields, (N_GRID, N_GRID), inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]])
+        wp.launch(initialize_fields, sim.shape, inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0], sim.n_grid, sim.dh])
         
         loss_val, grad_norm = sim.step_optimization()
         
@@ -75,7 +75,7 @@ def main():
     
     # verify
     # Run one last updated forward
-    wp.launch(initialize_fields, (N_GRID, N_GRID), inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]])
+    wp.launch(initialize_fields, sim.shape, inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0], sim.n_grid, sim.dh])
     sim.forward()
     v_final_x = sim.vx_arrays[-1].numpy()
     v_final_y = sim.vy_arrays[-1].numpy()
