@@ -346,20 +346,22 @@ class FluidOptimizer:
         
         self.tape.backward(self.loss)
         
-        # Gradient Clipping
-        # We need to copy grad to host to check/modify or use a kernel
-        # Since weights array is small (8), numpy is fine
+        # Gradient Processing
         grad_np = self.weights.grad.numpy()
+        
+        if not np.all(np.isfinite(grad_np)):
+            print("  [Warning] Gradients contain NaN/Inf! Skipping step.")
+            # Zero out grads to avoid polluting optimizer
+            self.weights.grad.zero_()
+            return self.loss.numpy()[0], float('nan')
+
         grad_norm = np.linalg.norm(grad_np)
         
-        max_grad_norm = 1.0
+        max_grad_norm = 0.5  # Stricter clip
         if grad_norm > max_grad_norm:
             scale = max_grad_norm / (grad_norm + 1e-6)
-            # Apply scaling
             grad_np = grad_np * scale
-            # Write back
             self.weights.grad = wp.array(grad_np, dtype=float, device=self.device)
-            # Update norm for logging
             grad_norm = max_grad_norm
         
         self.optimizer.step([self.weights.grad])
@@ -372,7 +374,8 @@ def main():
     device = wp.get_device()
     print(f"Running on device: {device}")
 
-    num_steps = 40
+    # Reduce horizon for stability
+    num_steps = 20
     num_bases = 8
     
     # Create Optimizer/Sim
@@ -382,8 +385,8 @@ def main():
     # 1. Generate a "Target" by running with secret weights
     # -------------------------------------------------------------------------
     print("Generating target trajectory...")
-    # Scale down the weights to keep simulation stable (CFL condition)
-    true_weights_np = np.random.uniform(-0.2, 0.2, size=(num_bases,)).astype(np.float32)
+    # Smaller weights for stability
+    true_weights_np = np.random.uniform(-0.1, 0.1, size=(num_bases,)).astype(np.float32)
     true_weights_wp = wp.array(true_weights_np, dtype=float, device=device)
     
     # Assign true weights temporarily
@@ -392,7 +395,7 @@ def main():
     # Initialize state
     wp.launch(initialize_fields, (N_GRID, N_GRID), inputs=[sim.density_arrays[0], sim.vx_arrays[0], sim.vy_arrays[0]])
     
-    # Run forward (no tape needed for target gen, but class does it)
+    # Run forward
     sim.forward()
     
     # Copy result to target
@@ -408,8 +411,8 @@ def main():
     
     # Reset weights to zero
     sim.weights.zero_()
-    # Reset Optimizer explicitly if needed or creating new one? 
-    sim.optimizer = warp.optim.Adam([sim.weights], lr=0.01) # Reduced LR
+    # Lower LR
+    sim.optimizer = warp.optim.Adam([sim.weights], lr=0.005)
     
     # Training Loop
     iterations = 200
