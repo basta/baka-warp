@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from src.fluid_engine import FluidOptimizer, initialize_fields, N_GRID, DH
+from src.fluid_engine import FluidOptimizer, initialize_fields, N_GRID, DH, BoundaryCondition
 from src.export_utils import export_simulation_sequence
 
 @wp.kernel
@@ -50,7 +50,7 @@ def main():
     num_steps = 20
     num_bases = 8
     
-    sim = FluidOptimizer(num_basis_fields=num_bases, sim_steps=num_steps, device=device)
+    sim = FluidOptimizer(num_basis_fields=num_bases, sim_steps=num_steps, device=device, bc_type=BoundaryCondition.WALL)
     
     # ---------------------------------------------------------
     # Define Target: Diagonal flow in center for ALL time steps

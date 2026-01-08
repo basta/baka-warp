@@ -6,6 +6,7 @@ import numpy as np
 
 import warp as wp
 import warp.optim
+from enum import IntEnum
 
 # Grid dimensions
 N_GRID = 64
@@ -16,6 +17,13 @@ DT = 0.005  # Reduced further
 DENSITY_INIT_RADIUS = 0.1
 CENTER_X = 0.5
 CENTER_Y = 0.5
+
+class BoundaryCondition(IntEnum):
+    PERIODIC = 0
+    WALL = 1
+
+BC_PERIODIC = 0
+BC_WALL = 1
 
 
 @wp.func
@@ -113,8 +121,7 @@ def advect_mac_u(
     v: wp.array2d(dtype=float),
     u_new: wp.array2d(dtype=float)
 ):
-    # Advect u component. u lives at (i, j+0.5) -- wait, standard MAC:
-    # u[i,j] is at face (i-1/2, j)? Or (i+1/2, j)?
+    # Advect u component. u lives at (i, j+0.5):
     # Convention: u[i, j] is flow across CONSTANT-X face between cell (i-1, j) and (i, j).
     # Coordinate: x = i * DH, y = (j + 0.5) * DH.
     
@@ -191,7 +198,8 @@ def advect_density(
     u: wp.array2d(dtype=float),
     v: wp.array2d(dtype=float),
     rho_old: wp.array2d(dtype=float),
-    rho_new: wp.array2d(dtype=float)
+    rho_new: wp.array2d(dtype=float),
+    bc_type: int
 ):
     # Advect scalar at cell centers (i+0.5, j+0.5)
     i, j = wp.tid()
@@ -202,20 +210,30 @@ def advect_density(
     
     # Velocity at center
     # u at (i, j+0.5) and (i+1, j+0.5). Avg to get center.
-    # We need u[i, j] and u[i+1, j].
-    # But u indices are 0..N. u[N] is boundary?
-    # Assume u has shape (N+1, N) or we use cyclic/clamp in sampler?
-    # Let's assume u, v are (N, N) and we use cyclic indices implicitly in kernel or valid ranges.
-    # Current codebase uses cyclic_index. Let's use that for neighbor access.
     
-    idx_i = i
-    idx_i1 = cyclic_index(i + 1)
+    u_idx = u[i, j]
+    u_idx1 = float(0.0)
     
-    idx_j = j
-    idx_j1 = cyclic_index(j + 1)
+    v_idx = v[i, j]
+    v_idx1 = float(0.0)
     
-    vel_x = (u[idx_i, j] + u[idx_i1, j]) * 0.5
-    vel_y = (v[i, idx_j] + v[i, idx_j1]) * 0.5
+    if bc_type == BC_PERIODIC:
+        u_idx1 = u[cyclic_index(i + 1), j]
+        v_idx1 = v[i, cyclic_index(j + 1)]
+    else:
+        # BC_WALL
+        if i == N_GRID - 1:
+            u_idx1 = 0.0
+        else:
+            u_idx1 = u[i + 1, j]
+            
+        if j == N_GRID - 1:
+            v_idx1 = 0.0
+        else:
+            v_idx1 = v[i, j + 1]
+    
+    vel_x = (u_idx + u_idx1) * 0.5
+    vel_y = (v_idx + v_idx1) * 0.5
     
     src_x = x - vel_x * dt
     src_y = y - vel_y * dt
@@ -228,24 +246,49 @@ def advect_density(
 
 
 @wp.kernel
-def divergence(u: wp.array2d(dtype=float), v: wp.array2d(dtype=float), div: wp.array2d(dtype=float)):
+def divergence(u: wp.array2d(dtype=float), v: wp.array2d(dtype=float), div: wp.array2d(dtype=float), bc_type: int):
     """Compute div(u) at cell centers."""
     i, j = wp.tid()
     
     # u[i, j] is left face, u[i+1, j] is right face
     # v[i, j] is bottom face, v[i, j+1] is top face
     
-    u_right = u[cyclic_index(i + 1), j]
-    u_left = u[i, j]
-    
-    v_top = v[i, cyclic_index(j + 1)]
-    v_bot = v[i, j]
-    
+    u_right = float(0.0)
+    u_left = float(0.0)
+    v_top = float(0.0)
+    v_bot = float(0.0)
+
+    if bc_type == BC_PERIODIC:
+        u_right = u[cyclic_index(i + 1), j]
+        u_left = u[i, j]
+        v_top = v[i, cyclic_index(j + 1)]
+        v_bot = v[i, j]
+    else:
+        # BC_WALL
+        
+        # Left face
+        u_left = u[i, j]
+        
+        # Right face
+        if i == N_GRID - 1:
+            u_right = 0.0
+        else:
+            u_right = u[i + 1, j]
+            
+        # Bottom face
+        v_bot = v[i, j]
+        
+        # Top face
+        if j == N_GRID - 1:
+            v_top = 0.0
+        else:
+            v_top = v[i, j + 1]
+
     div[i, j] = (u_right - u_left + v_top - v_bot) / DH
 
 
 @wp.kernel
-def jacobi_iter(div: wp.array2d(dtype=float), p0: wp.array2d(dtype=float), p1: wp.array2d(dtype=float)):
+def jacobi_iter(div: wp.array2d(dtype=float), p0: wp.array2d(dtype=float), p1: wp.array2d(dtype=float), bc_type: int):
     """Solve Laplacian P = div."""
     i, j = wp.tid()
     
@@ -253,10 +296,39 @@ def jacobi_iter(div: wp.array2d(dtype=float), p0: wp.array2d(dtype=float), p1: w
     # 4 * p[i, j] - neighbors = -div * dx^2
     # p[i,j] = (neighbors - div*dx^2) / 4
     
-    sum_neighbors = (p0[cyclic_index(i - 1), j] +
-                     p0[cyclic_index(i + 1), j] +
-                     p0[i, cyclic_index(j - 1)] +
-                     p0[i, cyclic_index(j + 1)])
+    val_left = float(0.0)
+    val_right = float(0.0)
+    val_down = float(0.0)
+    val_up = float(0.0)
+    
+    if bc_type == BC_PERIODIC:
+        val_left = p0[cyclic_index(i - 1), j]
+        val_right = p0[cyclic_index(i + 1), j]
+        val_down = p0[i, cyclic_index(j - 1)]
+        val_up = p0[i, cyclic_index(j + 1)]
+    else:
+        # BC_WALL: Neumann BC (dP/dn = 0) => P_boundary = P_inside
+        if i == 0:
+            val_left = p0[i, j]
+        else:
+            val_left = p0[i - 1, j]
+            
+        if i == N_GRID - 1:
+            val_right = p0[i, j]
+        else:
+            val_right = p0[i + 1, j]
+            
+        if j == 0:
+            val_down = p0[i, j]
+        else:
+            val_down = p0[i, j - 1]
+            
+        if j == N_GRID - 1:
+            val_up = p0[i, j]
+        else:
+            val_up = p0[i, j + 1]
+
+    sum_neighbors = val_left + val_right + val_down + val_up
                      
     p1[i, j] = 0.25 * (sum_neighbors - div[i, j] * DH * DH)
 
@@ -268,19 +340,39 @@ def update_velocities(
     v_in: wp.array2d(dtype=float),
     u_out: wp.array2d(dtype=float),
     v_out: wp.array2d(dtype=float),
+    bc_type: int
 ):
     """Subtract pressure gradient."""
     i, j = wp.tid()
 
     # Update u at (i, j+0.5) (left face of cell i,j)
     # Grad P x component at face: (P[i,j] - P[i-1,j]) / DH
-    grad_p_x = (p[i, j] - p[cyclic_index(i - 1), j]) / DH
-    u_out[i, j] = u_in[i, j] - grad_p_x
     
-    # Update v at (i+0.5, j) (bottom face of cell i,j)
-    # Grad P y component at face: (P[i,j] - P[i,j-1]) / DH
-    grad_p_y = (p[i, j] - p[i, cyclic_index(j - 1)]) / DH
-    v_out[i, j] = v_in[i, j] - grad_p_y
+    if bc_type == BC_PERIODIC:
+        grad_p_x = (p[i, j] - p[cyclic_index(i - 1), j]) / DH
+        u_out[i, j] = u_in[i, j] - grad_p_x
+        
+        grad_p_y = (p[i, j] - p[i, cyclic_index(j - 1)]) / DH
+        v_out[i, j] = v_in[i, j] - grad_p_y
+    else:
+        # BC_WALL
+        # For u (x-velocity on vertical faces)
+        # u[i, j] is on left face of cell i.
+        # If i=0 (left domain boundary), u MUST be 0.
+        if i == 0:
+            u_out[i, j] = 0.0
+        else:
+            grad_p_x = (p[i, j] - p[i - 1, j]) / DH
+            u_out[i, j] = u_in[i, j] - grad_p_x
+            
+        # For v (y-velocity on horizontal faces)
+        # v[i, j] is on bottom face of cell j.
+        # If j=0 (bottom domain boundary), v MUST be 0.
+        if j == 0:
+            v_out[i, j] = 0.0
+        else:
+            grad_p_y = (p[i, j] - p[i, j - 1]) / DH
+            v_out[i, j] = v_in[i, j] - grad_p_y
 
 
 @wp.kernel
@@ -301,10 +393,33 @@ def compute_velocity_loss(
     
     wp.atomic_add(loss, 0, val)
 
+@wp.kernel
+def enforce_noslip_velocity(
+    u: wp.array2d(dtype=float),
+    v: wp.array2d(dtype=float)
+):
+    """Explicitly zero out boundaries for wall BC."""
+    i, j = wp.tid()
+    
+    # Left wall
+    if i == 0:
+        u[i, j] = 0.0
+    # Right wall (implicit in staggered grid, u[N] is outside array if array is N)
+    # But for advection we might need to be careful?
+    # Our arrays are shape (N, N).
+    # u[i,j] is left face. u[0,j] is left wall.
+    # Where is right wall? It is face N. We don't store it.
+    
+    # Bottom wall
+    if j == 0:
+        v[i, j] = 0.0
+
 
 class FluidOptimizer:
-    def __init__(self, num_basis_fields=5, sim_steps=50, pressure_iterations=100, device=None):
+    def __init__(self, num_basis_fields=5, sim_steps=50, pressure_iterations=100, device=None, bc_type=BoundaryCondition.PERIODIC):
         self.device = device if device else wp.get_device()
+        self.bc_type = bc_type
+        self.num_basis_fields = num_basis_fields
         self.num_basis_fields = num_basis_fields
         self.sim_steps = sim_steps
         self.pressure_iterations = pressure_iterations
@@ -386,6 +501,9 @@ class FluidOptimizer:
         wp.launch(advect_mac_u, (N_GRID, N_GRID), inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.wx_arrays[t]])
         wp.launch(advect_mac_v, (N_GRID, N_GRID), inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.wy_arrays[t]])
         
+        if self.bc_type == BoundaryCondition.WALL:
+            wp.launch(enforce_noslip_velocity, (N_GRID, N_GRID), inputs=[self.wx_arrays[t], self.wy_arrays[t]])
+        
         # 2. Apply Forces
         # We need to sample basis at face centers.
         # For efficiency, let's just use existing kernels but we should strictly use face coordinates.
@@ -413,7 +531,7 @@ class FluidOptimizer:
         
         # 3. Pressure Projection
         # 3a. Divergence
-        wp.launch(divergence, (N_GRID, N_GRID), inputs=[self.wx_arrays[t], self.wy_arrays[t], self.div_arrays[t]])
+        wp.launch(divergence, (N_GRID, N_GRID), inputs=[self.wx_arrays[t], self.wy_arrays[t], self.div_arrays[t], self.bc_type.value])
         
         # 3b. Solve Pressure (Jacobi)
         self.pressure_arrays[t][0].zero_()
@@ -422,7 +540,7 @@ class FluidOptimizer:
             wp.launch(
                 jacobi_iter, 
                 (N_GRID, N_GRID), 
-                inputs=[self.div_arrays[t], self.pressure_arrays[t][k], self.pressure_arrays[t][k+1]]
+                inputs=[self.div_arrays[t], self.pressure_arrays[t][k], self.pressure_arrays[t][k+1], self.bc_type.value]
             )
             
         # 3c. Subtract Gradient
@@ -430,14 +548,14 @@ class FluidOptimizer:
         wp.launch(
             update_velocities,
             (N_GRID, N_GRID),
-            inputs=[self.pressure_arrays[t][final_p_idx], self.wx_arrays[t], self.wy_arrays[t], self.vx_arrays[t+1], self.vy_arrays[t+1]]
+            inputs=[self.pressure_arrays[t][final_p_idx], self.wx_arrays[t], self.wy_arrays[t], self.vx_arrays[t+1], self.vy_arrays[t+1], self.bc_type.value]
         )
         
         # 4. Advect Density (Passive Scalar)
         wp.launch(
             advect_density,
             (N_GRID, N_GRID),
-            inputs=[self.dt, self.vx_arrays[t+1], self.vy_arrays[t+1], self.density_arrays[t], self.density_arrays[t+1]]
+            inputs=[self.dt, self.vx_arrays[t+1], self.vy_arrays[t+1], self.density_arrays[t], self.density_arrays[t+1], self.bc_type.value]
         )
 
     def clear_all_gradients(self):
