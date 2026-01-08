@@ -86,9 +86,9 @@ def main():
     # Reset weights
     sim.weights.zero_()
     # Optimizer settings
-    sim.optimizer = wp.optim.Adam([sim.weights], lr=0.01)
+    sim.optimizer = wp.optim.Adam([sim.weights], lr=0.05)
 
-    iterations = 2000
+    iterations = 200
     for i in range(iterations):
         # Reset init state (density circle, 0 velocity)
         wp.launch(
@@ -158,19 +158,10 @@ def main():
     # ---------------------------------------------------------
     # Visualize Optimized Force Field
     # ---------------------------------------------------------
-    weights_np = sim.weights.numpy()
-    basis_fx_np = sim.basis_fx.numpy() # Shape: (num_bases, N_GRID, N_GRID)
-    basis_fy_np = sim.basis_fy.numpy()
     
-    # Compute effective force field
-    # F_total = sum(w_k * F_k)
-    total_fx = np.zeros_like(basis_fx_np[0])
-    total_fy = np.zeros_like(basis_fy_np[0])
+    # Use the new helper method
+    (total_fx, total_fy), basis_forces = sim.get_force_fields()
     
-    for k in range(len(weights_np)):
-        total_fx += weights_np[k] * basis_fx_np[k]
-        total_fy += weights_np[k] * basis_fy_np[k]
-        
     total_force_mag = np.sqrt(total_fx**2 + total_fy**2)
     
     plt.figure(figsize=(10, 5))
@@ -191,9 +182,6 @@ def main():
     
     Y, X = np.mgrid[0:N_GRID:step, 0:N_GRID:step]
     # Arrays are [x, y]. We want to plot Vectors at (X, Y).
-    # U = fx[x, y], V = fy[x, y]
-    # slicing: fx[0:N:step, 0:N:step] corresponds to x=0..N, y=0..N
-    # It matches the meshgrid (X, Y).
     plt.quiver(X, Y, total_fx[::step, ::step], total_fy[::step, ::step], color='r')
     
     plt.xlim(0, N_GRID)
@@ -207,12 +195,24 @@ def main():
     # Export to VTK
     # ---------------------------------------------------------
     print("Exporting simulation to VTK...")
+    
+    # Prepare extra fields
+    # Forces are constant in time, so we pass single frames which export_utils will repeat
+    extra_vectors = {
+        "force_total": (total_fx, total_fy)
+    }
+    
+    # Add individual basis forces
+    for k, (bfx, bfy) in enumerate(basis_forces):
+        extra_vectors[f"force_basis_{k:02d}"] = (bfx, bfy)
+
     export_simulation_sequence(
         output_dir="vtk_output",
         prefix="diagonal_flow",
         density_list=sim.density_arrays,
         vx_list=sim.vx_arrays,
-        vy_list=sim.vy_arrays
+        vy_list=sim.vy_arrays,
+        extra_vector_fields=extra_vectors
     )
 
 if __name__ == "__main__":
