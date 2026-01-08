@@ -11,15 +11,21 @@ from fluid_engine import FluidOptimizer, N_GRID, DH, cyclic_index
 
 @wp.kernel
 def compute_divergence(
-    vx: wp.array2d(dtype=float),
-    vy: wp.array2d(dtype=float),
+    u: wp.array2d(dtype=float),
+    v: wp.array2d(dtype=float),
     div_out: wp.array2d(dtype=float)
 ):
+    """Compute div(u) for MAC grid."""
     i, j = wp.tid()
-    # Centered difference
-    dx = (vx[cyclic_index(i + 1), j] - vx[cyclic_index(i - 1), j]) * 0.5 / DH
-    dy = (vy[i, cyclic_index(j + 1)] - vy[i, cyclic_index(j - 1)]) * 0.5 / DH
-    div_out[i, j] = dx + dy
+    # MAC Divergence: (u_right - u_left)/dx + (v_top - v_bot)/dx
+    # u[i+1, j] - u[i, j] + v[i, j+1] - v[i, j]
+    
+    u_right = u[cyclic_index(i + 1), j]
+    u_left = u[i, j]
+    v_top = v[i, cyclic_index(j + 1)]
+    v_bot = v[i, j]
+    
+    div_out[i, j] = (u_right - u_left + v_top - v_bot) / DH
 
 def run_simulation(iterations):
     fluid = FluidOptimizer(sim_steps=10, pressure_iterations=iterations)

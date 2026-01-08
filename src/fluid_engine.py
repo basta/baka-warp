@@ -81,78 +81,206 @@ def apply_forces(
     vy[i, j] = vy[i, j] + fy_sum * dt
 
 
+@wp.func
+def sample_field(field: wp.array2d(dtype=float), x: float, y: float):
+    # Bilinear interpolation
+    # field is defined at integer indices 0..N-1
+    # clamp coords
+    x = wp.max(0.0, wp.min(x, float(N_GRID) - 1.0))
+    y = wp.max(0.0, wp.min(y, float(N_GRID) - 1.0))
+
+    x0 = wp.int32(wp.floor(x))
+    y0 = wp.int32(wp.floor(y))
+    
+    wx1 = x - float(x0)
+    wy1 = y - float(y0)
+    wx0 = 1.0 - wx1
+    wy0 = 1.0 - wy1
+    
+    x1 = wp.min(x0 + 1, N_GRID - 1)
+    y1 = wp.min(y0 + 1, N_GRID - 1)
+    
+    val = (wx0 * wy0 * field[x0, y0] + 
+           wx1 * wy0 * field[x1, y0] + 
+           wx0 * wy1 * field[x0, y1] + 
+           wx1 * wy1 * field[x1, y1])
+    return val
+
 @wp.kernel
-def advect(
+def advect_mac_u(
     dt: float,
-    vx: wp.array2d(dtype=float),
-    vy: wp.array2d(dtype=float),
-    f0: wp.array2d(dtype=float),
-    f1: wp.array2d(dtype=float),
+    u: wp.array2d(dtype=float),
+    v: wp.array2d(dtype=float),
+    u_new: wp.array2d(dtype=float)
 ):
-    """Move field f0 according to vx and vy velocities using an implicit Euler integrator."""
-
+    # Advect u component. u lives at (i, j+0.5) -- wait, standard MAC:
+    # u[i,j] is at face (i-1/2, j)? Or (i+1/2, j)?
+    # Convention: u[i, j] is flow across CONSTANT-X face between cell (i-1, j) and (i, j).
+    # Coordinate: x = i * DH, y = (j + 0.5) * DH.
+    
     i, j = wp.tid()
-
+    
+    # World pos of this u-face
+    x = float(i) * DH
+    y = (float(j) + 0.5) * DH
+    
+    # Velocity at this point
+    # u is exact at this point
+    vel_x = u[i, j]
+    
+    # v needs interpolation. v lives at (x+0.5, y-0.5).
+    # We want v at (i, j+0.5)
+    # v grid coords: x_v = i - 0.5, y_v = j + 0.5
+    # To get world (i, j+0.5), we sample v at grid coord (i-0.5, j+0.5).
+    grid_v_x = float(i) - 0.5
+    grid_v_y = float(j) + 0.5
+    vel_y = sample_field(v, grid_v_x, grid_v_y)
+    
     # Backtrace
-    center_xs = float(i) - vx[i, j] * dt / DH # working in grid units for interpolation
-    center_ys = float(j) - vy[i, j] * dt / DH
-
-    # Compute indices of source cells.
-    left_idx = wp.int32(wp.floor(center_xs))
-    bot_idx = wp.int32(wp.floor(center_ys))
-
-    s1 = center_xs - float(left_idx)  # Relative weight of right cell
-    s0 = 1.0 - s1
-    t1 = center_ys - float(bot_idx)  # Relative weight of top cell
-    t0 = 1.0 - t1
-
-    i0 = cyclic_index(left_idx)
-    i1 = cyclic_index(left_idx + 1)
-    j0 = cyclic_index(bot_idx)
-    j1 = cyclic_index(bot_idx + 1)
-
-    # Perform bilinear interpolation
-    f1[i, j] = s0 * (t0 * f0[i0, j0] + t1 * f0[i0, j1]) + s1 * (t0 * f0[i1, j0] + t1 * f0[i1, j1])
+    src_x = x - vel_x * dt
+    src_y = y - vel_y * dt
+    
+    # Sample u at src. u lives at grid (i, j+0.5).
+    # grid u coords:
+    grid_src_x = src_x / DH
+    grid_src_y = (src_y / DH) - 0.5
+    
+    u_new[i, j] = sample_field(u, grid_src_x, grid_src_y)
 
 
 @wp.kernel
-def divergence(wx: wp.array2d(dtype=float), wy: wp.array2d(dtype=float), div: wp.array2d(dtype=float)):
-    """Compute div(w)."""
+def advect_mac_v(
+    dt: float,
+    u: wp.array2d(dtype=float),
+    v: wp.array2d(dtype=float),
+    v_new: wp.array2d(dtype=float)
+):
+    # Advect v component. v lives at (i+0.5, j).
+    # Convention: v[i, j] is flow across CONSTANT-Y face between cell (i, j-1) and (i, j).
+    
     i, j = wp.tid()
     
-    dx = (wx[cyclic_index(i + 1), j] - wx[cyclic_index(i - 1), j]) * 0.5 / DH
-    dy = (wy[i, cyclic_index(j + 1)] - wy[i, cyclic_index(j - 1)]) * 0.5 / DH
+    # World pos of this v-face
+    x = (float(i) + 0.5) * DH
+    y = float(j) * DH
     
-    div[i, j] = dx + dy
+    # Velocity
+    vel_y = v[i, j]
+    
+    # u needs interpolation. u lives at (i, j+0.5).
+    # We want u at (i+0.5, j).
+    # u grid coords: x_u = i + 0.5, y_u = j - 0.5
+    grid_u_x = float(i) + 0.5
+    grid_u_y = float(j) - 0.5
+    vel_x = sample_field(u, grid_u_x, grid_u_y)
+    
+    # Backtrace
+    src_x = x - vel_x * dt
+    src_y = y - vel_y * dt
+    
+    # Sample v at src. v lives at grid (i+0.5, j).
+    grid_src_x = (src_x / DH) - 0.5
+    grid_src_y = (src_y / DH)
+    
+    v_new[i, j] = sample_field(v, grid_src_x, grid_src_y)
+
+
+@wp.kernel
+def advect_density(
+    dt: float,
+    u: wp.array2d(dtype=float),
+    v: wp.array2d(dtype=float),
+    rho_old: wp.array2d(dtype=float),
+    rho_new: wp.array2d(dtype=float)
+):
+    # Advect scalar at cell centers (i+0.5, j+0.5)
+    i, j = wp.tid()
+    
+    # World pos
+    x = (float(i) + 0.5) * DH
+    y = (float(j) + 0.5) * DH
+    
+    # Velocity at center
+    # u at (i, j+0.5) and (i+1, j+0.5). Avg to get center.
+    # We need u[i, j] and u[i+1, j].
+    # But u indices are 0..N. u[N] is boundary?
+    # Assume u has shape (N+1, N) or we use cyclic/clamp in sampler?
+    # Let's assume u, v are (N, N) and we use cyclic indices implicitly in kernel or valid ranges.
+    # Current codebase uses cyclic_index. Let's use that for neighbor access.
+    
+    idx_i = i
+    idx_i1 = cyclic_index(i + 1)
+    
+    idx_j = j
+    idx_j1 = cyclic_index(j + 1)
+    
+    vel_x = (u[idx_i, j] + u[idx_i1, j]) * 0.5
+    vel_y = (v[i, idx_j] + v[i, idx_j1]) * 0.5
+    
+    src_x = x - vel_x * dt
+    src_y = y - vel_y * dt
+    
+    # Sample rho (centered)
+    grid_src_x = (src_x / DH) - 0.5
+    grid_src_y = (src_y / DH) - 0.5
+    
+    rho_new[i, j] = sample_field(rho_old, grid_src_x, grid_src_y)
+
+
+@wp.kernel
+def divergence(u: wp.array2d(dtype=float), v: wp.array2d(dtype=float), div: wp.array2d(dtype=float)):
+    """Compute div(u) at cell centers."""
+    i, j = wp.tid()
+    
+    # u[i, j] is left face, u[i+1, j] is right face
+    # v[i, j] is bottom face, v[i, j+1] is top face
+    
+    u_right = u[cyclic_index(i + 1), j]
+    u_left = u[i, j]
+    
+    v_top = v[i, cyclic_index(j + 1)]
+    v_bot = v[i, j]
+    
+    div[i, j] = (u_right - u_left + v_top - v_bot) / DH
 
 
 @wp.kernel
 def jacobi_iter(div: wp.array2d(dtype=float), p0: wp.array2d(dtype=float), p1: wp.array2d(dtype=float)):
-    """Calculate a single Jacobi iteration for solving the pressure Poisson equation."""
+    """Solve Laplacian P = div."""
     i, j = wp.tid()
-
-    p1[i, j] = 0.25 * (
-        -DH * DH * div[i, j]
-        + p0[cyclic_index(i - 1), j]
-        + p0[cyclic_index(i + 1), j]
-        + p0[i, cyclic_index(j - 1)]
-        + p0[i, cyclic_index(j + 1)]
-    )
+    
+    # Standard 5-point Laplacian
+    # 4 * p[i, j] - neighbors = -div * dx^2
+    # p[i,j] = (neighbors - div*dx^2) / 4
+    
+    sum_neighbors = (p0[cyclic_index(i - 1), j] +
+                     p0[cyclic_index(i + 1), j] +
+                     p0[i, cyclic_index(j - 1)] +
+                     p0[i, cyclic_index(j + 1)])
+                     
+    p1[i, j] = 0.25 * (sum_neighbors - div[i, j] * DH * DH)
 
 
 @wp.kernel
 def update_velocities(
     p: wp.array2d(dtype=float),
-    wx: wp.array2d(dtype=float),
-    wy: wp.array2d(dtype=float),
-    vx: wp.array2d(dtype=float),
-    vy: wp.array2d(dtype=float),
+    u_in: wp.array2d(dtype=float),
+    v_in: wp.array2d(dtype=float),
+    u_out: wp.array2d(dtype=float),
+    v_out: wp.array2d(dtype=float),
 ):
-    """Given p and (wx, wy), compute an 'incompressible' velocity field (vx, vy)."""
+    """Subtract pressure gradient."""
     i, j = wp.tid()
 
-    vx[i, j] = wx[i, j] - 0.5 * (p[cyclic_index(i + 1), j] - p[cyclic_index(i - 1), j]) / DH
-    vy[i, j] = wy[i, j] - 0.5 * (p[i, cyclic_index(j + 1)] - p[i, cyclic_index(j - 1)]) / DH
+    # Update u at (i, j+0.5) (left face of cell i,j)
+    # Grad P x component at face: (P[i,j] - P[i-1,j]) / DH
+    grad_p_x = (p[i, j] - p[cyclic_index(i - 1), j]) / DH
+    u_out[i, j] = u_in[i, j] - grad_p_x
+    
+    # Update v at (i+0.5, j) (bottom face of cell i,j)
+    # Grad P y component at face: (P[i,j] - P[i,j-1]) / DH
+    grad_p_y = (p[i, j] - p[i, cyclic_index(j - 1)]) / DH
+    v_out[i, j] = v_in[i, j] - grad_p_y
 
 
 @wp.kernel
@@ -175,7 +303,7 @@ def compute_velocity_loss(
 
 
 class FluidOptimizer:
-    def __init__(self, num_basis_fields=5, sim_steps=50, pressure_iterations=20, device=None):
+    def __init__(self, num_basis_fields=5, sim_steps=50, pressure_iterations=100, device=None):
         self.device = device if device else wp.get_device()
         self.num_basis_fields = num_basis_fields
         self.sim_steps = sim_steps
@@ -253,11 +381,23 @@ class FluidOptimizer:
     def run_step(self, t):
         """Execute one simulation step t -> t+1."""
         
-        # 1. Self-Advection
-        wp.launch(advect, (N_GRID, N_GRID), inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.vx_arrays[t]], outputs=[self.wx_arrays[t]])
-        wp.launch(advect, (N_GRID, N_GRID), inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.vy_arrays[t]], outputs=[self.wy_arrays[t]])
+        # 1. Advect Velocities (Self-Advection)
+        # u -> w_u, v -> w_v
+        wp.launch(advect_mac_u, (N_GRID, N_GRID), inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.wx_arrays[t]])
+        wp.launch(advect_mac_v, (N_GRID, N_GRID), inputs=[self.dt, self.vx_arrays[t], self.vy_arrays[t], self.wy_arrays[t]])
         
-        # 2. Apply Forces (Modify w inplace)
+        # 2. Apply Forces
+        # We need to sample basis at face centers.
+        # For efficiency, let's just use existing kernels but we should strictly use face coordinates.
+        # The basis functions are smooth so using standard grid indices is ok approximation, 
+        # but let's stick to the structure.
+        # Since apply_forces assumes collocated, let's just reuse it but acknowledge positions are slightly shifted?
+        # Actually `apply_forces` uses basis arrays which are N_GRID x N_GRID.
+        # We can just apply them directly to u and v arrays.
+        # u[i,j] corresponds to (i, j) in basis array?
+        # Let's trust the optimizer to learn the weights regardless of sub-grid phase shift.
+        # But we need to make sure we operate on w (intermediate)
+        
         wp.launch(
             apply_forces, 
             (N_GRID, N_GRID), 
@@ -273,18 +413,16 @@ class FluidOptimizer:
         
         # 3. Pressure Projection
         # 3a. Divergence
-        wp.launch(divergence, (N_GRID, N_GRID), inputs=[self.wx_arrays[t], self.wy_arrays[t]], outputs=[self.div_arrays[t]])
+        wp.launch(divergence, (N_GRID, N_GRID), inputs=[self.wx_arrays[t], self.wy_arrays[t], self.div_arrays[t]])
         
         # 3b. Solve Pressure (Jacobi)
-        # Initialize p0 to 0 or previous step? (previous step is better but keeping 0 for simplicity/independence)
         self.pressure_arrays[t][0].zero_()
         
         for k in range(self.pressure_iterations):
             wp.launch(
                 jacobi_iter, 
                 (N_GRID, N_GRID), 
-                inputs=[self.div_arrays[t], self.pressure_arrays[t][k]], 
-                outputs=[self.pressure_arrays[t][k+1]]
+                inputs=[self.div_arrays[t], self.pressure_arrays[t][k], self.pressure_arrays[t][k+1]]
             )
             
         # 3c. Subtract Gradient
@@ -292,16 +430,14 @@ class FluidOptimizer:
         wp.launch(
             update_velocities,
             (N_GRID, N_GRID),
-            inputs=[self.pressure_arrays[t][final_p_idx], self.wx_arrays[t], self.wy_arrays[t]],
-            outputs=[self.vx_arrays[t+1], self.vy_arrays[t+1]]
+            inputs=[self.pressure_arrays[t][final_p_idx], self.wx_arrays[t], self.wy_arrays[t], self.vx_arrays[t+1], self.vy_arrays[t+1]]
         )
         
         # 4. Advect Density (Passive Scalar)
         wp.launch(
-            advect,
+            advect_density,
             (N_GRID, N_GRID),
-            inputs=[self.dt, self.vx_arrays[t+1], self.vy_arrays[t+1], self.density_arrays[t]],
-            outputs=[self.density_arrays[t+1]]
+            inputs=[self.dt, self.vx_arrays[t+1], self.vy_arrays[t+1], self.density_arrays[t], self.density_arrays[t+1]]
         )
 
     def clear_all_gradients(self):
