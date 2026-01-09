@@ -13,7 +13,7 @@ N_GRID = 64
 DH = 1.0 / N_GRID
 
 # Simulation parameters
-DT = 0.005  # Reduced further
+DT = 0.005  
 DENSITY_INIT_RADIUS = 0.1
 CENTER_X = 0.5
 CENTER_Y = 0.5
